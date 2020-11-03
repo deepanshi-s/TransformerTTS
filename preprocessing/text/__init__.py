@@ -1,19 +1,40 @@
-from preprocessing.text.symbols import all_phonemes
+from preprocessing.text.cleaners import English, German
+from preprocessing.text.symbols import _phonemes, _punctuations
 from preprocessing.text.tokenizer import Phonemizer, Tokenizer
-from typing import Union
 
-class TextToTokens:
-    def __init__(self, phonemizer: Phonemizer, tokenizer: Tokenizer):
+
+class Pipeline:
+    def __init__(self, cleaner, phonemizer, tokenizer):
+        self.cleaner = cleaner
         self.phonemizer = phonemizer
         self.tokenizer = tokenizer
     
-    def __call__(self, input_text: Union[str, list])-> list:
-        phons = self.phonemizer(input_text)
+    def __call__(self, input_text):
+        text = self.cleaner(input_text)
+        phons = self.phonemizer(text)
         tokens = self.tokenizer(phons)
         return tokens
     
     @classmethod
-    def default(cls, language: str, add_start_end: bool, with_stress: bool, njobs=1):
-        phonemizer = Phonemizer(language=language, njobs=njobs, with_stress=with_stress)
-        tokenizer = Tokenizer(add_start_end=add_start_end)
-        return cls(phonemizer=phonemizer, tokenizer=tokenizer)
+    def default_pipeline(cls, language, add_start_end, with_stress):
+        if language == 'en':
+            cleaner = English()
+        elif language == 'de':
+            cleaner = German()
+        else:
+            raise ValueError(f'language must be either "en" or "de", not {language}.')
+        phonemizer = Phonemizer(language=language, strip=False, njobs=1, with_stress=with_stress)
+        tokenizer = Tokenizer(sorted(list(_phonemes) + list(_punctuations)), add_start_end=add_start_end)
+        return cls(cleaner=cleaner, phonemizer=phonemizer, tokenizer=tokenizer)
+    
+    @classmethod
+    def default_training_pipeline(cls, language, add_start_end,with_stress):
+        if language == 'en':
+            cleaner = English()
+        elif language == 'de':
+            cleaner = German()
+        else:
+            raise ValueError(f'language must be either "en" or "de", not {language}.')
+        phonemizer = Phonemizer(language=language, strip=True, njobs=4, with_stress=with_stress)
+        tokenizer = Tokenizer(sorted(list(_phonemes) + list(_punctuations)), add_start_end=add_start_end)
+        return cls(cleaner=cleaner, phonemizer=phonemizer, tokenizer=tokenizer)
