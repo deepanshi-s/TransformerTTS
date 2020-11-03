@@ -17,7 +17,7 @@ def positional_encoding(position, model_dim):
     angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
     
     pos_encoding = angle_rads[np.newaxis, ...]
-    
+    print('pos encode:', pos_encoding.shape)
     return tf.cast(pos_encoding, dtype=tf.float32)
 
 
@@ -46,8 +46,8 @@ def scaled_dot_product_attention(q, k, v, mask):
     scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
     
     # add the mask to the scaled tensor.
-    if mask is not None:
-        scaled_attention_logits += mask * -1e9
+    #if mask is not None:
+     #   scaled_attention_logits += mask * -1e9
     
     # softmax is normalized on the last axis (seq_len_k) so that the scores
     # add up to 1.
