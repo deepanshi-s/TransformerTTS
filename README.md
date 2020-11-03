@@ -3,11 +3,11 @@
 This repo is based on the following papers:
 - MultiSpeech: Multi-Speaker Text to Speech with Transformer (https://arxiv.org/pdf/2006.04664.pdf)
 
-The multispeech paper talks about four changes to the transformer model.
--Layer Normalization
--Speaker module
--Bottleneck in decoder prenet
--Diagnol Constraint
+The multispeech paper talks about four changes to the transformer model:
+- Layer Normalization
+- Speaker module
+- Bottleneck in decoder prenet
+- Diagnol Constraint
 
 I have integrated the first three changes in the transformer git repo. Speaker modules for encoder and decoder have been added in model/layers.py. The phoneme input has been normalized in the SelfAttentionBlocks class of the model/layers.py. The decoder prenet has been changed accordingly in the class defination of DecoderPrenet in model/layers.py. Necessary changes to load and pass the speaker embeddings (x-vectors here) to encoder have been made to the code. 
 
