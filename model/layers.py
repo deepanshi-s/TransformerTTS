@@ -2,6 +2,23 @@ import tensorflow as tf
 
 from model.transformer_utils import positional_encoding, scaled_dot_product_attention
 
+class enc_Speaker_module(tf.keras.layers.Layer):
+  def __init__(self,dim:int,**kwargs):
+    super(enc_Speaker_module, self).__init__(**kwargs)
+    self.d1 = tf.keras.layers.Dense(units = dim, activation = 'softsign')
+
+  def call(self, x, training):
+      x = self.d1(x, training = True)
+      return(x)
+
+class dec_Speaker_module(tf.keras.layers.Layer):
+  def __init__(self,dim:int,**kwargs):
+    super(dec_Speaker_module, self).__init__(**kwargs)
+    self.d1 = tf.keras.layers.Dense(units = dim, activation = 'softsign')
+
+  def call(self, x, training):
+      x = self.d1(x, training = True)
+      return(x)
 
 class CNNResNorm(tf.keras.layers.Layer):
     def __init__(self,
@@ -34,16 +51,16 @@ class CNNResNorm(tf.keras.layers.Layer):
     def call_convs(self, x, training):
         for i in range(0, len(self.convolutions)):
             x = self.convolutions[i](x)
-            x = self.inner_activations[i](x)
             x = self.normalization[i](x, training=training)
+            x = self.inner_activations[i](x)
         return x
     
     def call(self, inputs, training):
         x = self.call_convs(inputs, training=training)
         x = self.last_conv(x)
-        x = self.last_activation(x)
         x = self.normalization[-2](x, training=training)
-        return self.normalization[-1](inputs + x, training=training)
+        x = self.last_activation(x)
+        return self.normalization[-1](inputs + x)
 
 
 class FFNResNorm(tf.keras.layers.Layer):
@@ -107,7 +124,7 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         assert model_dim % self.num_heads == 0
         
         self.depth = model_dim // self.num_heads
-        
+        #dense layers for attention weight calculations 
         self.wq = tf.keras.layers.Dense(model_dim)
         self.wk = tf.keras.layers.Dense(model_dim)
         self.wv = tf.keras.layers.Dense(model_dim)
@@ -118,7 +135,6 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         """ Split the last dimension into (num_heads, depth).
         Transpose the result such that the shape is (batch_size, num_heads, seq_len, depth)
         """
-        
         x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
         return tf.transpose(x, perm=[0, 2, 1, 3])
     
@@ -132,17 +148,14 @@ class MultiHeadAttention(tf.keras.layers.Layer):
         q = self.split_heads(q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
         k = self.split_heads(k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
         v = self.split_heads(v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
-        
-        scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v, mask) #calculate the attention weights 
         scaled_attention = self.head_drop(scaled_attention, training=training, drop_n_heads=drop_n_heads)
-        
         scaled_attention = tf.transpose(scaled_attention,
                                         perm=[0, 2, 1, 3])  # (batch_size, seq_len_q, num_heads, depth)
         concat_attention = tf.reshape(scaled_attention,
                                       (batch_size, -1, self.model_dim))  # (batch_size, seq_len_q, model_dim)
         concat_query = tf.concat([q_in, concat_attention], axis=-1)
         output = self.dense(concat_query)  # (batch_size, seq_len_q, model_dim)
-        
         return output, attention_weights
 
 
@@ -226,6 +239,7 @@ class SelfAttentionBlocks(tf.keras.layers.Layer):
         super(SelfAttentionBlocks, self).__init__(**kwargs)
         self.model_dim = model_dim
         self.pos_encoding_scalar = tf.Variable(1.)
+        self.ln = tf.keras.layers.LayerNormalization(epsilon=1e-6) 
         self.pos_encoding = positional_encoding(maximum_position_encoding, model_dim)
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
         self.encoder_SADB = [
@@ -240,7 +254,9 @@ class SelfAttentionBlocks(tf.keras.layers.Layer):
     
     def call(self, inputs, training, padding_mask, drop_n_heads, reduction_factor=1):
         seq_len = tf.shape(inputs)[1]
-        x = inputs * tf.math.sqrt(tf.cast(self.model_dim, tf.float32))
+        #normalization of phonemes
+        x = self.ln(inputs)
+        x = x * tf.math.sqrt(tf.cast(self.model_dim, tf.float32))
         x += self.pos_encoding_scalar * self.pos_encoding[:, :seq_len * reduction_factor:reduction_factor, :]
         x = self.dropout(x, training=training)
         attention_weights = {}
@@ -272,7 +288,7 @@ class CrossAttentionResnorm(tf.keras.layers.Layer):
         out = self.layernorm(attn_values + q)
         return out, attn_weights
 
-
+#return here
 class CrossAttentionDenseBlock(tf.keras.layers.Layer):
     
     def __init__(self,
@@ -359,7 +375,7 @@ class CrossAttentionBlocks(tf.keras.layers.Layer):
     def call(self, inputs, enc_output, training, decoder_padding_mask, encoder_padding_mask, drop_n_heads,
              reduction_factor=1):
         seq_len = tf.shape(inputs)[1]
-        x = inputs * tf.math.sqrt(tf.cast(self.model_dim, tf.float32))
+        x = inputs * tf.math.sqrt(tf.cast(self.model_dim, tf.float32)) #x dim = n,n,256
         x += self.pos_encoding_scalar * self.pos_encoding[:, :seq_len * reduction_factor:reduction_factor, :]
         x = self.dropout(x, training=training)
         attention_weights = {}
@@ -383,12 +399,17 @@ class DecoderPrenet(tf.keras.layers.Layer):
                  dropout_rate: float,
                  **kwargs):
         super(DecoderPrenet, self).__init__(**kwargs)
-        self.d1 = tf.keras.layers.Dense(dense_hidden_units,
+        #changed dimension here 
+        self.d1 = tf.keras.layers.Dense(32,
                                         activation='relu')  # (batch_size, seq_len, dense_hidden_units)
-        self.d2 = tf.keras.layers.Dense(model_dim, activation='relu')  # (batch_size, seq_len, model_dim)
+        self.d2 = tf.keras.layers.Dense(32, activation='relu')  # (batch_size, seq_len, model_dim)
+        self.d3 = tf.keras.layers.Dense(256, activation='relu') 
+        self.d4 = tf.keras.layers.Dense(512, activation='relu') 
         self.rate = tf.Variable(dropout_rate, trainable=False)
         self.dropout_1 = tf.keras.layers.Dropout(self.rate)
         self.dropout_2 = tf.keras.layers.Dropout(self.rate)
+        self.dropout_3 = tf.keras.layers.Dropout(self.rate)
+
     
     def call(self, x):
         self.dropout_1.rate = self.rate
@@ -398,6 +419,7 @@ class DecoderPrenet(tf.keras.layers.Layer):
         x = self.dropout_1(x, training=True)
         x = self.d2(x)
         x = self.dropout_2(x, training=True)
+        x = self.d3(x)
         return x
 
 
@@ -497,3 +519,4 @@ class Expand(tf.keras.layers.Layer):
         mask_reshape = tf.multiply(reshaped, index_masks[:, :, tf.newaxis])
         ragged = tf.RaggedTensor.from_row_lengths(mask_reshape[index_masks > 0], non_zeros)
         return ragged.to_tensor()
+  
