@@ -4,9 +4,9 @@ import tensorflow as tf
 
 from model.transformer_utils import create_encoder_padding_mask, create_mel_padding_mask, create_look_ahead_mask
 from utils.losses import weighted_sum_losses, masked_mean_absolute_error, new_scaled_crossentropy
-from preprocessing.text import TextToTokens
+from preprocessing.text import Pipeline
 from model.layers import DecoderPrenet, Postnet, DurationPredictor, Expand, SelfAttentionBlocks, CrossAttentionBlocks, \
-    CNNResNorm
+    CNNResNorm, enc_Speaker_module, dec_Speaker_module
 
 
 class AutoregressiveTransformer(tf.keras.models.Model):
@@ -26,9 +26,10 @@ class AutoregressiveTransformer(tf.keras.models.Model):
                  postnet_conv_layers: int,
                  postnet_kernel_size: int,
                  dropout_rate: float,
-                 mel_start_value: float,
-                 mel_end_value: float,
+                 mel_start_value: int,
+                 mel_end_value: int,
                  mel_channels: int,
+                 xvec_channels : int,
                  phoneme_language: str,
                  with_stress: bool,
                  encoder_attention_conv_filters: int = None,
@@ -49,12 +50,14 @@ class AutoregressiveTransformer(tf.keras.models.Model):
         self.r = max_r
         self.mel_channels = mel_channels
         self.drop_n_heads = 0
-        self.text_pipeline = TextToTokens.default(phoneme_language,
-                                                  add_start_end=True,
-                                                  with_stress=with_stress)
+        self.text_pipeline = Pipeline.default_pipeline(phoneme_language,
+                                                       add_start_end=True,
+                                                       with_stress=with_stress)
         self.encoder_prenet = tf.keras.layers.Embedding(self.text_pipeline.tokenizer.vocab_size,
                                                         encoder_prenet_dimension,
                                                         name='Embedding')
+        self.enc_speaker_mod = enc_Speaker_module(dim=512)
+        self.dec_speaker_mod = dec_Speaker_module(dim=256)
         self.encoder = SelfAttentionBlocks(model_dim=encoder_model_dimension,
                                            dropout_rate=dropout_rate,
                                            num_heads=encoder_num_heads,
@@ -90,19 +93,23 @@ class AutoregressiveTransformer(tf.keras.models.Model):
         self.training_input_signature = [
             tf.TensorSpec(shape=(None, None), dtype=tf.int32),
             tf.TensorSpec(shape=(None, None, mel_channels), dtype=tf.float32),
-            tf.TensorSpec(shape=(None, None), dtype=tf.int32)
+            tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, None, xvec_channels), dtype=tf.float32)
         ]
         self.forward_input_signature = [
             tf.TensorSpec(shape=(None, None), dtype=tf.int32),
             tf.TensorSpec(shape=(None, None, mel_channels), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, None, xvec_channels), dtype=tf.float32)
         ]
         self.encoder_signature = [
-            tf.TensorSpec(shape=(None, None), dtype=tf.int32)
+            tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, None, xvec_channels), dtype=tf.float32)
         ]
         self.decoder_signature = [
             tf.TensorSpec(shape=(None, None, encoder_model_dimension), dtype=tf.float32),
             tf.TensorSpec(shape=(None, None, mel_channels), dtype=tf.float32),
             tf.TensorSpec(shape=(None, None, None, None), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, None, xvec_channels), dtype=tf.float32)
         ]
         self.debug = debug
         self._apply_all_signatures()
@@ -120,24 +127,31 @@ class AutoregressiveTransformer(tf.keras.models.Model):
     def _apply_all_signatures(self):
         self.forward = self._apply_signature(self._forward, self.forward_input_signature)
         self.train_step = self._apply_signature(self._train_step, self.training_input_signature)
-        self.val_step = self._apply_signature(self._val_step, self.training_input_signature)
+        #self.val_step = self._apply_signature(self._val_step, self.training_input_signature)
         self.forward_encoder = self._apply_signature(self._forward_encoder, self.encoder_signature)
         self.forward_decoder = self._apply_signature(self._forward_decoder, self.decoder_signature)
     
-    def _call_encoder(self, inputs, training):
+    def _call_encoder(self, inputs, xvectors, training):
+      #add xvectors
         padding_mask = create_encoder_padding_mask(inputs)
         enc_input = self.encoder_prenet(inputs)
         enc_output, attn_weights = self.encoder(enc_input,
                                                 training=training,
                                                 padding_mask=padding_mask,
                                                 drop_n_heads=self.drop_n_heads)
+        x_vec = self.enc_speaker_mod(xvectors)
+        #mention axis is concatenation
+        enc_output = tf.keras.layers.concatenate([enc_output, x_vec], axis = 1)
         return enc_output, padding_mask, attn_weights
     
-    def _call_decoder(self, encoder_output, targets, encoder_padding_mask, training):
+    def _call_decoder(self, encoder_output, targets, encoder_padding_mask, training, xvectors):
+      #xvec
         dec_target_padding_mask = create_mel_padding_mask(targets)
         look_ahead_mask = create_look_ahead_mask(tf.shape(targets)[1])
         combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
         dec_input = self.decoder_prenet(targets)
+        xvec = self.dec_speaker_mod(xvectors)
+        dec_input = tf.keras.layers.concatenate([dec_input, xvec], axis = 1)
         dec_output, attention_weights = self.decoder(inputs=dec_input,
                                                      enc_output=encoder_output,
                                                      training=training,
@@ -154,19 +168,23 @@ class AutoregressiveTransformer(tf.keras.models.Model):
             {'decoder_attention': attention_weights, 'decoder_output': dec_output, 'linear': mel})
         return model_output
     
-    def _forward(self, inp, output):
-        model_out = self.__call__(inputs=inp,
+    def _forward(self, inp, output, xvectors):
+      #xvec
+        model_out = self.__call__(inputs=inp, xvectors = xvectors,
                                   targets=output,
                                   training=False)
         return model_out
     
-    def _forward_encoder(self, inputs):
-        return self._call_encoder(inputs, training=False)
+    def _forward_encoder(self, inputs, xvectors):
+      #xvec
+        return self._call_encoder(inputs, xvectors = xvectors, training=False)
     
-    def _forward_decoder(self, encoder_output, targets, encoder_padding_mask):
-        return self._call_decoder(encoder_output, targets, encoder_padding_mask, training=False)
+    def _forward_decoder(self, encoder_output, targets, encoder_padding_mask,  xvectors):
+      #xvec
+        return self._call_decoder(encoder_output, targets, encoder_padding_mask, xvectors = xvectors, training=False)
     
-    def _gta_forward(self, inp, tar, stop_prob, training):
+    def _gta_forward(self, inp, tar, stop_prob, xvectors, training):
+      #add xvector 
         tar_inp = tar[:, :-1]
         tar_real = tar[:, 1:]
         tar_stop_prob = stop_prob[:, 1:]
@@ -175,8 +193,9 @@ class AutoregressiveTransformer(tf.keras.models.Model):
         tar_mel = tar_inp[:, 0::self.r, :]
         
         with tf.GradientTape() as tape:
+          #add xvector in inputs
             model_out = self.__call__(inputs=inp,
-                                      targets=tar_mel,
+                                      targets=tar_mel, xvectors = xvectors,
                                       training=training)
             loss, loss_vals = weighted_sum_losses((tar_real,
                                                    tar_stop_prob,
@@ -191,14 +210,16 @@ class AutoregressiveTransformer(tf.keras.models.Model):
         model_out.update({'reduced_target': tar_mel})
         return model_out, tape
     
-    def _train_step(self, inp, tar, stop_prob):
-        model_out, tape = self._gta_forward(inp, tar, stop_prob, training=True)
+    def _train_step(self, inp, tar, stop_prob, xvectors):
+      #add xvector 
+        print('train step')
+        model_out, tape = self._gta_forward(inp, tar, stop_prob, xvectors, training=True)
         gradients = tape.gradient(model_out['loss'], self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
         return model_out
     
-    def _val_step(self, inp, tar, stop_prob):
-        model_out, _ = self._gta_forward(inp, tar, stop_prob, training=False)
+    def _val_step(self, inp, tar, stop_prob, xvectors):
+        model_out, _ = self._gta_forward(inp, tar, stop_prob,xvectors = xvectors, training=False)
         return model_out
     
     def _compile(self, stop_scaling, optimizer):
@@ -220,23 +241,28 @@ class AutoregressiveTransformer(tf.keras.models.Model):
             return
         self.drop_n_heads = heads
         self._apply_all_signatures()
-    
-    def call(self, inputs, targets, training):
-        encoder_output, padding_mask, encoder_attention = self._call_encoder(inputs, training)
-        model_out = self._call_decoder(encoder_output, targets, padding_mask, training)
+
+
+    def call(self, inputs, targets, xvectors, training):
+      #xvectors
+        encoder_output, padding_mask, encoder_attention = self._call_encoder(inputs, xvectors, training)
+        model_out = self._call_decoder(encoder_output, targets, padding_mask, training, xvectors)
         model_out.update({'encoder_attention': encoder_attention})
         return model_out
     
-    def predict(self, inp, max_length=1000, encode=True, verbose=True):
+    def predict(self, inp,xvectors, max_length=1000, encode=True, verbose=True):
+      #Aadd  xvectir
         if encode:
             inp = self.encode_text(inp)
         inp = tf.cast(tf.expand_dims(inp, 0), tf.int32)
         output = tf.cast(tf.expand_dims(self.start_vec, 0), tf.float32)
         output_concat = tf.cast(tf.expand_dims(self.start_vec, 0), tf.float32)
         out_dict = {}
-        encoder_output, padding_mask, encoder_attention = self.forward_encoder(inp)
+        #add xvector
+        encoder_output, padding_mask, encoder_attention = self.forward_encoder(inp, xvectors = xvectors)
         for i in range(int(max_length // self.r) + 1):
-            model_out = self.forward_decoder(encoder_output, output, padding_mask)
+          #add xvec
+            model_out = self.forward_decoder(encoder_output, output, padding_mask, xvectors = xvectors)
             output = tf.concat([output, model_out['final_output'][:1, -1:, :]], axis=-2)
             output_concat = tf.concat([tf.cast(output_concat, tf.float32), model_out['final_output'][:1, -self.r:, :]],
                                       axis=-2)
@@ -294,9 +320,9 @@ class ForwardTransformer(tf.keras.models.Model):
                  decoder_prenet_dropout=0.,
                  **kwargs):
         super(ForwardTransformer, self).__init__(**kwargs)
-        self.text_pipeline = TextToTokens.default(phoneme_language,
-                                                  add_start_end=False,
-                                                  with_stress=with_stress)
+        self.text_pipeline = Pipeline.default_pipeline(phoneme_language,
+                                                       add_start_end=False,
+                                                       with_stress=with_stress)
         self.drop_n_heads = 0
         self.mel_channels = mel_channels
         self.encoder_prenet = tf.keras.layers.Embedding(self.text_pipeline.tokenizer.vocab_size,
@@ -457,9 +483,7 @@ class ForwardTransformer(tf.keras.models.Model):
     def predict(self, inp, encode=True, speed_regulator=1.):
         if encode:
             inp = self.encode_text(inp)
-        if len(tf.shape(inp))<2:
-            inp = tf.expand_dims(inp, 0)
-        inp = tf.cast(inp, tf.int32)
+            inp = tf.cast(tf.expand_dims(inp, 0), tf.int32)
         duration_scalar = tf.cast(1. / speed_regulator, tf.float32)
         out = self.forward(inp, durations_scalar=duration_scalar)
         out['mel'] = tf.squeeze(out['mel'])
