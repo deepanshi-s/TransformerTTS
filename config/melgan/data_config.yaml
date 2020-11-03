@@ -26,5 +26,5 @@ f_min: 0
 f_max: 8000
 normalizer: MelGAN                 # which mel normalization to use from utils.audio.py [MelGAN or WaveRNN]
 # TOKENIZER
-phoneme_language: 'en-us'
+phoneme_language: 'en'
 with_stress: True                  # use stress symbols in phonemization
