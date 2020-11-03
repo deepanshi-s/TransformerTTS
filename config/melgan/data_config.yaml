@@ -6,14 +6,14 @@ train_metadata_filename: 'train_metafile.txt' # target file for training metadat
 train_data_directory: 'transformer_tts_data'   # training data is stored here
 valid_metadata_filename: 'valid_metafile.txt'
 session_name: melgan    # session naming, can be specified in command line
-data_name: ljspeech                # naming for default data reader (select function from preprocessing/metadata_readers.py)
+#data_name: ljspeech                # naming for default data reader (select function from preprocessing/metadata_readers.py)
 
 # DATA
 n_samples: 100000
 n_test: 100
 mel_start_value: .5
 mel_end_value: -.5
-max_mel_len: 1_200
+max_mel_len: 1200
 min_mel_len: 80
 
 # AUDIO
